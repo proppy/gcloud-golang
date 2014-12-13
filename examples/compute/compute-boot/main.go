@@ -17,33 +17,36 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
 
-	"github.com/golang/oauth2"
-	"github.com/golang/oauth2/google"
-	"google.golang.org/cloud"
-	computeutil "google.golang.org/cloud/compute/util"
+	cloud "github.com/proppy/gcloud-golang"
+	"github.com/proppy/gcloud-golang/compute/computeutil"
+	"github.com/proppy/oauth2"
+	"github.com/proppy/oauth2/google"
 )
 
 var (
-	jsonFile          = flag.String("j", "", "A path to your JSON key file for your service account downloaded from Google Developer Console, not needed if you run it on Compute Engine instances.")
-	projID            = flag.String("p", "", "The ID of your Google Cloud project.")
-	name              = flag.String("n", "gcloud-computeutil-instance", "The name of the instance to create.")
-	image             = flag.String("i", "projects/google-containers/global/images/container-vm-v20140929", "The image to use for the instance.")
-	zone              = flag.String("z", "us-central1-f", "The zone for the instance.")
-	machineType       = flag.String("m", "f1-micro", "The machine type for the instance.")
-	startupScriptPath = flag.String("s", "", "The path to the startup script for the instance")
+	jsonFile   = flag.String("json", "", "A path to your JSON key file for your service account downloaded from Google Developer Console, not needed if you run it on Compute Engine instances.")
+	gcloudCred = flag.Bool("gcloud", false, "If true, reuse gcloud credentials for authorization")
+
+	projID            = flag.String("project", "", "The ID of your Google Cloud project.")
+	name              = flag.String("name", "gcloud-computeutil-instance", "The name of the instance to create.")
+	image             = flag.String("image", "projects/google-containers/global/images/container-vm-v20141208", "The image to use for the instance.")
+	zone              = flag.String("zone", "us-central1-f", "The zone for the instance.")
+	machineType       = flag.String("machine", "f1-micro", "The machine type for the instance.")
+	startupScriptPath = flag.String("startup", "", "The path to the startup script for the instance")
 )
 
 func main() {
 	flag.Parse()
-	if *jsonFile == "" || *projID == "" {
+	if (*jsonFile == "" && !*gcloudCred) || (*jsonFile != "" && *gcloudCred) || *projID == "" {
 		flag.PrintDefaults()
-		log.Fatalf("Please specify JSON file and Project ID.")
+		log.Fatalf("Please specify either gcloud or JSON credentials and a project ID.")
 	}
 	var metadata map[string]string
 	if *startupScriptPath != "" {
@@ -56,14 +59,11 @@ func main() {
 		}
 		log.Println(metadata)
 	}
-	flow, err := oauth2.New(
-		google.ServiceAccountJSONKey(*jsonFile),
-		oauth2.Scope(computeutil.ScopeCompute),
-	)
+	t, err := getTransport()
 	if err != nil {
-		log.Fatalf("oauth2 flow creation failed, %v", err)
+		log.Fatalf("failed to create transport: %v", err)
 	}
-	client := &http.Client{Transport: flow.NewTransport()}
+	client := &http.Client{Transport: t}
 	ctx := cloud.WithZone(cloud.NewContext(*projID, client), *zone)
 	var instance *computeutil.Instance
 	instance, err = computeutil.GetInstance(ctx, *name)
@@ -80,4 +80,28 @@ func main() {
 	}
 	log.Printf("instance %q ready: %#v", *name, instance)
 	io.Copy(os.Stdout, instance.SerialPortOutput(ctx))
+}
+
+func getTransport() (*oauth2.Transport, error) {
+	if *gcloudCred {
+		flow, err := oauth2.New(
+			google.GcloudCredentials(),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create oauth2 flow from gcloud credentials")
+		}
+		t := flow.NewTransport()
+		if err := t.Refresh(); err != nil {
+			return nil, fmt.Errorf("failed to refresh token: %v", err)
+		}
+		return t, nil
+	}
+	flow, err := oauth2.New(
+		google.ServiceAccountJSONKey(*jsonFile),
+		oauth2.Scope(computeutil.ScopeCompute),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create oauth flow from json file %q: %v", err)
+	}
+	return flow.NewTransport(), nil
 }
